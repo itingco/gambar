@@ -1,0 +1,1 @@
+Manual smoke test: php artisan images:index; php artisan route:list; php artisan serve; upload JPG/PNG/WEBP and verify ranked filenames. Run composer install before artisan.

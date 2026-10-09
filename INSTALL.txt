@@ -1,0 +1,18 @@
+SMART IMAGES - GOOGLE DRIVE PATCH (Laravel 10)
+
+1. Timpa folder app/ dan config/ pada C:\xampp82\htdocs\smartimages
+2. Buat file Service Account key BARU di Google Cloud. Key yang ikut terunggah sebelumnya harus dinonaktifkan/dihapus (rotate).
+3. Simpan key baru di storage/app/private/google-service-account.json (JANGAN di upload/git).
+4. Edit .env yang SUDAH ADA, bukan .env.example:
+   DRIVE_FOLDER_ID=1JqqvhWEmXV9CUKgC7wKWpce2dO-nCJqe
+   DRIVE_SERVICE_ACCOUNT_JSON=storage/app/private/google-service-account.json
+5. Tambahkan ke .gitignore:
+   /storage/app/private/
+6. Jalankan dalam PowerShell:
+   php artisan optimize:clear
+   php artisan images:sync-drive
+   php artisan route:list
+   php artisan serve --port=8085
+7. Buka http://127.0.0.1:8085
+
+Catatan: patch ini menyinkronkan gambar ke cache lokal untuk pencarian cepat. Tidak menghapus file katalog lama. Tidak termasuk private key, .env atau folder vendor. Memerlukan PHP GD, OpenSSL, koneksi internet, dan folder Drive yang dibagikan ke email Service Account.

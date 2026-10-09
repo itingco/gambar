@@ -1,0 +1,11 @@
+/vendor
+/node_modules
+/.env
+/storage/app/drive-service-account.json
+/storage/app/catalog/*
+!/storage/app/catalog/.gitkeep
+/storage/app/image-index.json
+/storage/framework/cache/data/*
+/storage/framework/sessions/*
+/storage/framework/views/*
+/storage/logs/*.log

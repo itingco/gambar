@@ -1,0 +1,35 @@
+{
+  "name": "ingco/smart-image-finder",
+  "type": "project",
+  "require": {
+    "php": "^8.1",
+    "laravel/framework": "^10.48",
+    "guzzlehttp/guzzle": "7.9",
+    "laravel/tinker": "2.10",
+    "psy/psysh": "0.12"
+},
+"config": {
+    "audit": {
+        "block-insecure": false
+    }
+},
+  "require-dev": {
+    "nunomaduro/collision": "^7.0",
+    "phpunit/phpunit": "^10.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "app/",
+      "Database\\Factories\\": "database/factories/",
+      "Database\\Seeders\\": "database/seeders/"
+    }
+  },
+  "scripts": {
+    "post-autoload-dump": [
+      "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+      "@php artisan package:discover --ansi"
+    ]
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}

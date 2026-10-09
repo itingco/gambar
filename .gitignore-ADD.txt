@@ -1,0 +1,3 @@
+# Tambahkan baris ini ke .gitignore project (jangan timpa file .gitignore lama)
+/storage/app/private/*.json
+/storage/app/drive-image-index.json
