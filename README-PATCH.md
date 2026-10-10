@@ -1,26 +1,29 @@
-# SmartImages — Pemilihan database berdasarkan folder Drive
+# Smart Image Finder v2.7 — Thumbnail Cache (Laravel 10)
 
-## Aturan
+## Patch
+Timpa hanya file `app/Services/ThumbnailCache.php`, `app/Console/Commands/BuildGalleryThumbnails.php`, `app/Http/Controllers/GalleryController.php`, dan `resources/views/gallery.blade.php`. Backup dulu file lama. Tidak mengubah rute, .env, database, atau indeks.
 
-- `Ingco/HTBP020328.webp` → ItemCode `HTBP020328` → **AS_INGCO** saja.
-- `Wadfow/03644.webp` → ItemCode `03644` → **AS_SMI** saja.
-- Folder lain (selain top-level Ingco) → **AS_SMI** saja.
-- Pencocokan nama folder `Ingco` tidak membedakan huruf besar/kecil.
-- Jika ItemCode tidak ditemukan di database tujuan, tidak berpindah ke database lainnya.
-- Nama barang dan harga RETAIL diambil dari database sesuai folder; filter kecocokan dan modal preview tetap sama.
-
-## Instalasi
-
-1. Backup file lama `app/Http/Controllers/ImageFinderController.php` dan `app/Services/RetailProductLookup.php`.
-2. Ekstrak ZIP dan salin folder `app` ke `C:\xampp82\htdocs\smartimages`, pilih Replace.
-3. Jalankan:
-
-```powershell
+## Jalankan di Ubuntu
+```bash
+cd /var/www/gambar
 php artisan optimize:clear
-php artisan route:list
-php artisan serve --port=8085
+php artisan list | grep images:thumbnails
+mkdir -p public/gallery-thumbs
+sudo chown -R it-pc:www-data public/gallery-thumbs
+sudo chmod 2775 public/gallery-thumbs
+php artisan images:thumbnails --brand=ingco --limit=100
+php artisan images:thumbnails --brand=smi --limit=100
 ```
+Ulangi masing-masing command untuk batch berikutnya; `--limit=0` untuk memproses seluruh sisanya. File yang sudah ada akan di-skip. Untuk memperbarui thumbnail jika foto pada indeks berubah, jalankan `php artisan images:sync-drive` terlebih dahulu lalu command thumbnail; filename berisi hash versi `stamp`, sehingga tidak memerlukan penghapusan file lama untuk invalidasi. Sesekali bersihkan thumbnail lama setelah memastikan semua item versi baru sudah berhasil.
 
-Tidak perlu migration atau indexing ulang. Pastikan `sqlsrv_ingco` dan `sqlsrv_smi` sudah dikonfigurasi di `config/database.php` serta driver `pdo_sqlsrv` aktif.
+## Kinerja
+Thumbnail disimpan di `public/gallery-thumbs/*.webp` sehingga Nginx melayani langsung sebagai file statis; tidak ada request ke Google Drive saat grid ditampilkan. `GET /catalog/{id}` tetap dipakai untuk modal gambar resolusi asli; ini masih membutuhkan Google Drive. Gambar yang belum diproses hanya menampilkan placeholder, tidak otomatis mengunduh berkas besar pada setiap buka galeri.
 
-**Catatan:** indeks gambar `storage/app/drive-image-index.json` harus menyimpan `path` yang diawali nama subfolder (`Ingco/...` atau `Wadfow/...`). Format ini sudah dihasilkan oleh command indeks Drive versi sebelumnya.
+## Catatan
+- Command memakai GD WebP dan credential Drive untuk mengunduh **sementara**, kemudian menghapus file sementara.
+- 12 gambar per halaman dan lazy load tetap digunakan.
+- Folder `public/gallery-thumbs` dapat diakses publik. Hindari penggunaan untuk gambar rahasia.
+- Jangan sertakan JSON service-account dalam ZIP atau public.
+- Jika `images:thumbnails` tidak ditemukan, lihat bahwa `app/Console/Kernel.php` memuat `$this->load(__DIR__.'/Commands');` atau command didaftarkan manual.
+- Bila cache config atau route berubah, `php artisan optimize:clear` cukup.
+- Lakukan tes di staging/lokal sebelum deploy produksi.

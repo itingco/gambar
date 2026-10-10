@@ -14,14 +14,18 @@ class ImageFinderController extends Controller
 
     public function search(Request $request, ImageMatcher $matcher, DriveImageIndex $index, RetailProductLookup $products)
     {
-        $request->validate(['image'=>'required|image|mimes:jpeg,png,webp,gif|max:10240', 'limit'=>'nullable|integer|min:1|max:40']);
+        $request->validate(['image'=>'required|image|mimes:jpeg,png,webp,gif|max:10240', 'limit'=>'nullable|integer|min:1|max:40', 'source'=>'required|in:ingco,smi']);
         $features = $matcher->features($request->file('image')->getRealPath());
         if (!$features) return response()->json(['message'=>'Gambar tidak dapat dibaca'], 422);
         $all = $index->load(); $results = [];
+        $source = $request->input('source');
         foreach ($all as $id=>$item) {
+            $path = trim(str_replace('\\', '/', (string) ($item['path'] ?? '')), '/');
+            $ingco = preg_match('~^Ingco(/|$)~i', $path) === 1;
+            if (($source === 'ingco') !== $ingco) continue;
             $results[] = ['id'=>$id,'name'=>$item['name'],'path'=>$item['path'],
                 'score'=>$matcher->score($features, $item['features']),
-                'url'=>route('finder.image', ['id'=>$id]),
+                'url'=>'/catalog/'.rawurlencode((string) $id),
                 'drive_url'=>'https://drive.google.com/file/d/'.rawurlencode($id).'/view'];
         }
         usort($results, static fn ($a,$b) => $b['score'] <=> $a['score']);
@@ -37,7 +41,8 @@ class ImageFinderController extends Controller
         unset($row);
         return response()->json([
             'database_errors' => $lookup['errors'],
-            'total' => count($all),
+            'total' => count($results),
+            'source' => $source,
             'threshold' => 90,
             'fallback' => count($aboveThreshold) === 0 && count($results) > 0,
             'results' => $chosen,
