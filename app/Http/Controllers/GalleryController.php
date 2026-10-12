@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Services\DriveImageIndex;
 use App\Services\ThumbnailCache;
+use App\Services\GalleryPreviewCache;
 use App\Services\RetailProductLookup;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -18,7 +19,7 @@ class GalleryController extends Controller
         return view('gallery');
     }
 
-    public function items(Request $request, DriveImageIndex $index, RetailProductLookup $products, ThumbnailCache $thumbnails)
+    public function items(Request $request, DriveImageIndex $index, RetailProductLookup $products, ThumbnailCache $thumbnails, GalleryPreviewCache $previews)
     {
         $params = $request->validate([
             'q' => 'nullable|string|max:100',
@@ -89,6 +90,10 @@ class GalleryController extends Controller
             $indexedItem = $rawIndex[$item['id']] ?? null;
             $item['thumbnail_url'] = is_array($indexedItem) && $thumbnails->exists($item['id'], $indexedItem)
                 ? $thumbnails->url($item['id'], $indexedItem) : null;
+            // Modal: gunakan preview lokal resolusi lebih tinggi bila sudah dibuat.
+            $item['preview_url'] = is_array($indexedItem) && $previews->exists($item['id'], $indexedItem)
+                ? $previews->url($item['id'], $indexedItem) : null;
+            // Gambar Drive asli hanya dicoba oleh browser setelah thumbnail lokal muncul.
             $item['url'] = '/catalog/' . rawurlencode($item['id']);
             $item['product'] = $lookups['products'][$item['id']] ?? null;
             unset($item['path']);

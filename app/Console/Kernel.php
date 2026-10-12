@@ -1,5 +1,4 @@
 <?php
-
 namespace App\Console;
 
 use Illuminate\Console\Scheduling\Schedule;
@@ -11,15 +10,10 @@ class Kernel extends ConsoleKernel
         \App\Console\Commands\IndexImages::class,
         \App\Console\Commands\SyncDriveImages::class,
         \App\Console\Commands\BuildGalleryThumbnails::class,
+        \App\Console\Commands\ExportAiManifest::class,
+        \App\Console\Commands\BuildGalleryPreviews::class,
     ];
 
-    protected function schedule(Schedule $schedule): void
-    {
-        //
-    }
-
-    protected function commands(): void
-    {
-        require base_path('routes/console.php');
-    }
+    protected function schedule(Schedule $schedule): void {}
+    protected function commands(): void { require base_path('routes/console.php'); }
 }

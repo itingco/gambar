@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Image Finder CLIP inference
+After=network.target
+
+[Service]
+Type=simple
+User=it-pc
+Group=www-data
+WorkingDirectory=/var/www/gambar
+Environment=IMAGE_AI_THREADS=4
+ExecStart=/var/www/gambar/.venv-ai/bin/python /var/www/gambar/ai/server.py --index /var/www/gambar/storage/app/ai-clip-index.npz --host 127.0.0.1 --port 8779
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

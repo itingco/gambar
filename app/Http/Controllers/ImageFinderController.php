@@ -3,49 +3,67 @@ namespace App\Http\Controllers;
 
 use App\Services\DriveClient;
 use App\Services\DriveImageIndex;
-use App\Services\ImageMatcher;
 use App\Services\RetailProductLookup;
+use App\Services\ThumbnailCache;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 
 class ImageFinderController extends Controller
 {
-    public function index(DriveImageIndex $index) { return view('finder', ['count'=>count($index->load())]); }
-
-    public function search(Request $request, ImageMatcher $matcher, DriveImageIndex $index, RetailProductLookup $products)
+    public function index(DriveImageIndex $index)
     {
-        $request->validate(['image'=>'required|image|mimes:jpeg,png,webp,gif|max:10240', 'limit'=>'nullable|integer|min:1|max:40', 'source'=>'required|in:ingco,smi']);
-        $features = $matcher->features($request->file('image')->getRealPath());
-        if (!$features) return response()->json(['message'=>'Gambar tidak dapat dibaca'], 422);
-        $all = $index->load(); $results = [];
-        $source = $request->input('source');
-        foreach ($all as $id=>$item) {
-            $path = trim(str_replace('\\', '/', (string) ($item['path'] ?? '')), '/');
-            $ingco = preg_match('~^Ingco(/|$)~i', $path) === 1;
-            if (($source === 'ingco') !== $ingco) continue;
-            $results[] = ['id'=>$id,'name'=>$item['name'],'path'=>$item['path'],
-                'score'=>$matcher->score($features, $item['features']),
-                'url'=>'/catalog/'.rawurlencode((string) $id),
-                'drive_url'=>'https://drive.google.com/file/d/'.rawurlencode($id).'/view'];
+        return view('finder', ['count' => count($index->load())]);
+    }
+
+    public function search(Request $request, DriveImageIndex $index, RetailProductLookup $products, ThumbnailCache $thumbs)
+    {
+        $request->validate(['image' => 'required|image|mimes:jpeg,png,webp,gif|max:10240']);
+        $file = $request->file('image');
+        $ch = curl_init(rtrim(config('image_ai.url'), '/') . '/search');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => ['image' => new \CURLFile($file->getRealPath(), $file->getMimeType(), 'photo.jpg'), 'limit' => '5'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_TIMEOUT => config('image_ai.timeout', 45),
+            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+        ]);
+        $response = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($response === false || $errno || $http !== 200) {
+            return response()->json(['message' => 'Layanan AI belum tersedia. Jalankan Python AI service dan bangun indeks CLIP terlebih dahulu.'], 503);
         }
-        usort($results, static fn ($a,$b) => $b['score'] <=> $a['score']);
-        $aboveThreshold = array_values(array_filter($results, static fn ($row) => $row['score'] > 90));
-        $chosen = count($aboveThreshold) ? $aboveThreshold : array_slice($results, 0, 1);
+        $data = json_decode((string)$response, true);
+        if (!is_array($data) || !is_array($data['results'] ?? null)) {
+            return response()->json(['message'=>'Respons AI tidak valid'], 502);
+        }
+        $all = $index->load();
+        $chosen = [];
+        foreach ($data['results'] as $match) {
+            $id = (string)($match['id'] ?? '');
+            if (!isset($all[$id]) || !is_array($all[$id])) continue;
+            $item = $all[$id];
+            $thumbUrl = $thumbs->exists($id, $item) ? $thumbs->url($id, $item) : null;
+            $chosen[] = [
+                'id'=>$id, 'name'=>(string)($item['name']??''), 'path'=>(string)($item['path']??''),
+                'score'=>round((float)($match['similarity']??0)*100, 1),
+                'url'=>$thumbUrl ?? '/catalog/'.rawurlencode($id),
+                'thumbnail_url'=>$thumbUrl,
+                'original_url'=>'/catalog/'.rawurlencode($id),
+            ];
+        }
         $lookup = $products->findForResults($chosen);
         foreach ($chosen as &$row) {
-            $code = $products->itemCode($row['name']);
-            $row['item_code'] = $code;
+            $row['item_code'] = $products->itemCode($row['name']);
             $row['product'] = $lookup['products'][$row['id']] ?? null;
-            unset($row['drive_url']);
         }
         unset($row);
         return response()->json([
-            'database_errors' => $lookup['errors'],
-            'total' => count($results),
-            'source' => $source,
-            'threshold' => 90,
-            'fallback' => count($aboveThreshold) === 0 && count($results) > 0,
-            'results' => $chosen,
+            'results'=>$chosen, 'total'=>(int)($data['total']??0),
+            'database_errors'=>$lookup['errors'], 'fallback'=>true,
+            'ai_mode'=>true, 'threshold'=>null,
         ]);
     }
 
@@ -60,8 +78,6 @@ class ImageFinderController extends Controller
             }
             $bytes = file_get_contents($tmp); @unlink($tmp);
             return response($bytes, 200, ['Content-Type'=>$info['mime'], 'Cache-Control'=>'private, max-age=300', 'X-Content-Type-Options'=>'nosniff']);
-        } catch (\Throwable $e) {
-            report($e); abort(502, 'Gagal mengambil gambar dari Drive');
-        }
+        } catch (\Throwable $e) { report($e); abort(502, 'Gagal mengambil gambar dari Drive'); }
     }
 }
