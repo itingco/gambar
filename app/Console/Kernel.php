@@ -12,6 +12,7 @@ class Kernel extends ConsoleKernel
         \App\Console\Commands\BuildGalleryThumbnails::class,
         \App\Console\Commands\ExportAiManifest::class,
         \App\Console\Commands\BuildGalleryPreviews::class,
+        \App\Console\Commands\TestSumopod::class,
     ];
 
     protected function schedule(Schedule $schedule): void {}
