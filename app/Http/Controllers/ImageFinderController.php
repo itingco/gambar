@@ -89,6 +89,7 @@ class ImageFinderController extends Controller
             'fallback'=>true,
             'ai_mode'=>true,
             'ai_provider'=>$verification['used'] ? 'clip+sumopod' : 'clip',
+            'learning'=>$data['feedback'] ?? null,
             'sumopod'=>[
                 'enabled'=>$sumopod->enabled(),
                 'used'=>$verification['used'],
@@ -97,6 +98,57 @@ class ImageFinderController extends Controller
                 'message'=>$verification['error'],
             ],
             'threshold'=>null,
+        ]);
+    }
+
+    public function feedback(Request $request, DriveImageIndex $index)
+    {
+        $request->validate([
+            'image' => 'required|image|mimes:jpeg,png,webp,gif|max:10240',
+            'selected_id' => ['required', 'string', 'max:200', 'regex:/^[A-Za-z0-9_-]{8,200}$/'],
+        ]);
+
+        $selectedId = (string) $request->input('selected_id');
+        $all = $index->load();
+        if (!isset($all[$selectedId]) || !is_array($all[$selectedId])) {
+            return response()->json(['message' => 'Gambar yang dipilih tidak ditemukan di indeks katalog.'], 422);
+        }
+
+        $file = $request->file('image');
+        $ch = curl_init(rtrim(config('image_ai.url'), '/') . '/feedback');
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => [
+                'image' => new \CURLFile($file->getRealPath(), $file->getMimeType(), 'feedback.jpg'),
+                'selected_id' => $selectedId,
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_TIMEOUT => config('image_ai.timeout', 45),
+            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+        ]);
+        $response = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($response === false || $errno || $http !== 200) {
+            return response()->json([
+                'message' => 'Pilihan belum berhasil disimpan ke AI. Pastikan service AI sudah direstart dengan versi terbaru.'
+            ], 503);
+        }
+
+        $data = json_decode((string) $response, true);
+        if (!is_array($data) || ($data['status'] ?? null) !== 'ok') {
+            return response()->json(['message' => 'Respons feedback AI tidak valid.'], 502);
+        }
+
+        return response()->json([
+            'message' => 'Pilihan gambar benar sudah dipelajari AI.',
+            'selected_id' => $selectedId,
+            'selected_name' => (string)($all[$selectedId]['name'] ?? ''),
+            'feedback_examples' => (int)($data['feedback_examples'] ?? 0),
+            'votes' => (int)($data['votes'] ?? 1),
         ]);
     }
 

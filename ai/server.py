@@ -1,8 +1,12 @@
-"""Smart Image Finder v3.1 — CPU CLIP + focused multi-crop inference.
+"""Smart Image Finder v3.2 — CPU CLIP + focused multi-crop + user feedback learning.
 
 Backward compatible with the v3 CLIP .npz index and POST /search contract.
 Use mode=single to reproduce v3 search, mode=multi (default) for multiple crops.
-Only uploaded queries are cropped; the 2,378 existing catalog embeddings are reused.
+Only uploaded queries are cropped; the existing catalog embeddings are reused.
+
+User corrections are stored as CLIP query prototypes in ai-feedback.npz. During later
+searches, visually similar corrected examples can boost the catalog image selected by
+users without rebuilding the main catalog index.
 """
 import argparse
 import asyncio
@@ -19,6 +23,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 MODEL = os.environ.get('IMAGE_AI_MODEL', 'ViT-B-32')
 PRETRAINED = os.environ.get('IMAGE_AI_PRETRAINED', 'laion2b_s34b_b79k')
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+FEEDBACK_MATCH_THRESHOLD = float(os.environ.get('IMAGE_AI_FEEDBACK_THRESHOLD', '0.78'))
+FEEDBACK_MAX_BOOST = float(os.environ.get('IMAGE_AI_FEEDBACK_MAX_BOOST', '0.22'))
+FEEDBACK_DUPLICATE_THRESHOLD = float(os.environ.get('IMAGE_AI_FEEDBACK_DUPLICATE_THRESHOLD', '0.985'))
+FEEDBACK_MAX_EXAMPLES = max(100, int(os.environ.get('IMAGE_AI_FEEDBACK_MAX_EXAMPLES', '5000')))
 Image.MAX_IMAGE_PIXELS = 20_000_000
 
 
@@ -123,6 +131,149 @@ def query_vectors(crops, model, preprocess):
     return features.float().cpu().numpy()
 
 
+def query_prototype(vectors):
+    """One normalized embedding representing the whole multi-crop query."""
+    prototype = np.mean(np.asarray(vectors, dtype=np.float32), axis=0)
+    norm = float(np.linalg.norm(prototype))
+    if not np.isfinite(norm) or norm <= 1e-12:
+        raise ValueError('Invalid query embedding')
+    return (prototype / norm).astype(np.float32)
+
+
+class FeedbackStore:
+    """Persistent user-labeled query prototypes used as a conservative reranking signal."""
+
+    def __init__(self, path, embedding_dim):
+        self.path = Path(path)
+        self.embedding_dim = int(embedding_dim)
+        self.ids = []
+        self.vectors = np.empty((0, self.embedding_dim), dtype=np.float32)
+        self.votes = np.empty((0,), dtype=np.int32)
+        self.load()
+
+    def load(self):
+        if not self.path.is_file():
+            return
+        try:
+            with np.load(self.path, allow_pickle=False) as data:
+                ids = [str(v) for v in data['ids'].tolist()]
+                vectors = np.asarray(data['vectors'], dtype=np.float32)
+                votes = np.asarray(
+                    data['votes'] if 'votes' in data.files else np.ones(len(ids)),
+                    dtype=np.int32,
+                )
+            if vectors.ndim != 2 or vectors.shape[1] != self.embedding_dim:
+                raise ValueError('embedding dimension mismatch')
+            if len(ids) != len(vectors) or len(votes) != len(ids):
+                raise ValueError('feedback array length mismatch')
+            if not np.isfinite(vectors).all():
+                raise ValueError('feedback contains invalid vectors')
+            self.ids = ids[-FEEDBACK_MAX_EXAMPLES:]
+            self.vectors = vectors[-FEEDBACK_MAX_EXAMPLES:].copy()
+            self.votes = np.maximum(1, votes[-FEEDBACK_MAX_EXAMPLES:]).copy()
+            print(f"Loaded {len(self.ids)} AI feedback examples from {self.path}", flush=True)
+        except Exception as exc:
+            print(f"Ignoring invalid AI feedback file {self.path}: {exc}", flush=True)
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(self.path) + '.tmp.npz'
+        np.savez_compressed(
+            tmp,
+            ids=np.array(self.ids),
+            vectors=self.vectors.astype(np.float32),
+            votes=self.votes.astype(np.int32),
+            model=np.array([MODEL, PRETRAINED]),
+        )
+        os.replace(tmp, self.path)
+
+    def add(self, selected_id, prototype):
+        selected_id = str(selected_id)
+        prototype = np.asarray(prototype, dtype=np.float32)
+        if prototype.shape != (self.embedding_dim,) or not np.isfinite(prototype).all():
+            raise ValueError('Invalid feedback embedding')
+
+        # A near-identical query corrected to another product means the latest user
+        # selection wins. Remove conflicting prototypes before recording this one.
+        if len(self.ids):
+            similarities = self.vectors @ prototype
+            keep = np.ones(len(self.ids), dtype=bool)
+            for idx, similarity in enumerate(similarities):
+                if similarity >= FEEDBACK_DUPLICATE_THRESHOLD and self.ids[idx] != selected_id:
+                    keep[idx] = False
+            if not keep.all():
+                self.ids = [value for i, value in enumerate(self.ids) if keep[i]]
+                self.vectors = self.vectors[keep]
+                self.votes = self.votes[keep]
+
+        # Repeated confirmation of almost the same visual example increases its vote
+        # count instead of growing the feedback file indefinitely.
+        if len(self.ids):
+            similarities = self.vectors @ prototype
+            best_idx = int(np.argmax(similarities))
+            if self.ids[best_idx] == selected_id and similarities[best_idx] >= FEEDBACK_DUPLICATE_THRESHOLD:
+                old_votes = int(self.votes[best_idx])
+                merged = (self.vectors[best_idx] * old_votes + prototype) / (old_votes + 1)
+                merged /= max(float(np.linalg.norm(merged)), 1e-12)
+                self.vectors[best_idx] = merged.astype(np.float32)
+                self.votes[best_idx] = old_votes + 1
+                self.save()
+                return {'examples': len(self.ids), 'votes': int(self.votes[best_idx]), 'merged': True}
+
+        self.ids.append(selected_id)
+        self.vectors = np.vstack([self.vectors, prototype.reshape(1, -1)])
+        self.votes = np.append(self.votes, np.int32(1))
+        if len(self.ids) > FEEDBACK_MAX_EXAMPLES:
+            overflow = len(self.ids) - FEEDBACK_MAX_EXAMPLES
+            self.ids = self.ids[overflow:]
+            self.vectors = self.vectors[overflow:]
+            self.votes = self.votes[overflow:]
+        self.save()
+        return {'examples': len(self.ids), 'votes': 1, 'merged': False}
+
+    def boost(self, scores, catalog_ids, prototype):
+        info = {
+            'used': False,
+            'examples': len(self.ids),
+            'matched_examples': 0,
+            'best_similarity': None,
+            'boosted_ids': [],
+        }
+        if not len(self.ids):
+            return scores, info
+
+        prototype = np.asarray(prototype, dtype=np.float32)
+        similarities = self.vectors @ prototype
+        best_similarity = float(np.max(similarities))
+        info['best_similarity'] = round(best_similarity, 4)
+        matching = np.where(similarities >= FEEDBACK_MATCH_THRESHOLD)[0]
+        info['matched_examples'] = int(len(matching))
+        if not len(matching):
+            return scores, info
+
+        boosted = np.asarray(scores, dtype=np.float32).copy()
+        catalog_map = {str(value): idx for idx, value in enumerate(catalog_ids)}
+        boost_by_catalog = {}
+
+        for feedback_idx in matching:
+            catalog_idx = catalog_map.get(self.ids[int(feedback_idx)])
+            if catalog_idx is None:
+                continue
+            similarity = float(similarities[int(feedback_idx)])
+            strength = (similarity - FEEDBACK_MATCH_THRESHOLD) / max(1e-6, 1.0 - FEEDBACK_MATCH_THRESHOLD)
+            vote_factor = min(1.20, 1.0 + 0.04 * np.log1p(int(self.votes[int(feedback_idx)])))
+            amount = min(FEEDBACK_MAX_BOOST, FEEDBACK_MAX_BOOST * max(0.0, strength) * vote_factor)
+            boost_by_catalog[catalog_idx] = max(boost_by_catalog.get(catalog_idx, 0.0), amount)
+
+        for catalog_idx, amount in boost_by_catalog.items():
+            boosted[catalog_idx] = min(1.0, float(boosted[catalog_idx]) + amount)
+
+        if boost_by_catalog:
+            info['used'] = True
+            info['boosted_ids'] = [str(catalog_ids[idx]) for idx in boost_by_catalog.keys()]
+        return boosted, info
+
+
 def similarity_rank(catalog_vectors, query_embedding, mode):
     """Return fusion rank scores and raw per-crop cosine similarities.
 
@@ -140,10 +291,13 @@ def similarity_rank(catalog_vectors, query_embedding, mode):
     return blended, cosines
 
 
-def score_query(image, model, preprocess, catalog_vectors, ids, limit, mode):
+def score_query(image, model, preprocess, catalog_vectors, ids, limit, mode, feedback_store):
     crops = query_crops(image, mode)
     q = query_vectors(crops, model, preprocess)
     scores, cosine_scores = similarity_rank(catalog_vectors, q, mode)
+    prototype = query_prototype(q)
+    scores, feedback_info = feedback_store.boost(scores, ids, prototype)
+
     k = max(1, min(int(limit), 100, len(ids)))
     if k == len(ids):
         picks = np.argsort(-scores)[:k]
@@ -162,11 +316,28 @@ def score_query(image, model, preprocess, catalog_vectors, ids, limit, mode):
         'total': int(len(ids)),
         'mode': mode,
         'crops_used': [name for name, _ in crops],
+        'feedback': feedback_info,
         'results': data,
     }
 
 
-def serve(index_path, host, port):
+async def decode_upload_image(image):
+    raw = await image.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, 'Image too large (max 10 MB)')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as im:
+                im.load()
+                if im.width < 24 or im.height < 24:
+                    raise ValueError('Too small')
+                return im.copy()
+    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise HTTPException(422, 'Invalid or excessively large image')
+
+
+def serve(index_path, feedback_path, host, port):
     import uvicorn
 
     model, preprocess = model_loader()
@@ -181,14 +352,18 @@ def serve(index_path, host, port):
     if not np.isfinite(vectors).all():
         raise RuntimeError('Indeks AI mengandung nilai tidak valid')
 
+    feedback_store = FeedbackStore(feedback_path, vectors.shape[1])
+    catalog_ids = {str(value) for value in ids.tolist()}
+
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    inference_gate = asyncio.Semaphore(1)  # protect local CPU/RAM from concurrent requests
+    inference_gate = asyncio.Semaphore(1)  # protect local CPU/RAM and feedback file
 
     @app.get('/health')
     def health():
         return {
             'status': 'ok', 'indexed': int(len(ids)), 'model': MODEL,
             'search_mode': 'multi-crop', 'max_candidates': 100,
+            'feedback_examples': len(feedback_store.ids),
         }
 
     @app.post('/search')
@@ -197,27 +372,38 @@ def serve(index_path, host, port):
             raise HTTPException(422, 'mode must be single or multi')
         if not (1 <= limit <= 100):
             raise HTTPException(422, 'limit must be 1 to 100')
-        raw = await image.read(MAX_UPLOAD_BYTES + 1)
-        if len(raw) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, 'Image too large (max 10 MB)')
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error', Image.DecompressionBombWarning)
-                with Image.open(io.BytesIO(raw)) as im:
-                    im.load()
-                    if im.width < 24 or im.height < 24:
-                        raise ValueError('Too small')
-                    photo = im.copy()
-        except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
-            raise HTTPException(422, 'Invalid or excessively large image')
+        photo = await decode_upload_image(image)
         async with inference_gate:
             try:
                 return await asyncio.to_thread(
-                    score_query, photo, model, preprocess, vectors, ids, limit, mode
+                    score_query, photo, model, preprocess, vectors, ids, limit, mode, feedback_store
                 )
             except Exception as exc:
                 print('AI search error:', type(exc).__name__, str(exc), flush=True)
                 raise HTTPException(500, 'AI inference failed')
+
+    @app.post('/feedback')
+    async def feedback(image: UploadFile = File(...), selected_id: str = Form(...)):
+        selected_id = str(selected_id).strip()
+        if selected_id not in catalog_ids:
+            raise HTTPException(422, 'selected_id is not present in catalog index')
+        photo = await decode_upload_image(image)
+        async with inference_gate:
+            try:
+                crops = query_crops(photo, 'multi')
+                q = await asyncio.to_thread(query_vectors, crops, model, preprocess)
+                prototype = query_prototype(q)
+                result = feedback_store.add(selected_id, prototype)
+                return {
+                    'status': 'ok',
+                    'selected_id': selected_id,
+                    'feedback_examples': int(result['examples']),
+                    'votes': int(result['votes']),
+                    'merged': bool(result['merged']),
+                }
+            except Exception as exc:
+                print('AI feedback error:', type(exc).__name__, str(exc), flush=True)
+                raise HTTPException(500, 'AI feedback save failed')
 
     uvicorn.run(app, host=host, port=port, access_log=False)
 
@@ -227,10 +413,11 @@ if __name__ == '__main__':
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--manifest', default='storage/app/ai-manifest.json')
     parser.add_argument('--index', default='storage/app/ai-clip-index.npz')
+    parser.add_argument('--feedback', default='storage/app/ai-feedback.npz')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8779)
     args = parser.parse_args()
     if args.build:
         build(args.manifest, args.index)
     else:
-        serve(args.index, args.host, args.port)
+        serve(args.index, args.feedback, args.host, args.port)
