@@ -7,10 +7,12 @@ Type=simple
 User=it-pc
 Group=www-data
 WorkingDirectory=/var/www/gambar
+Environment=PYTHONUNBUFFERED=1
 Environment=IMAGE_AI_THREADS=4
-ExecStart=/var/www/gambar/.venv-ai/bin/python /var/www/gambar/ai/server.py --index /var/www/gambar/storage/app/ai-clip-index.npz --host 127.0.0.1 --port 8779
+ExecStart=/var/www/gambar/.venv-ai/bin/python /var/www/gambar/ai/server.py --index /var/www/gambar/storage/app/ai-clip-index.npz --feedback /var/www/gambar/storage/app/ai-feedback.npz --host 127.0.0.1 --port 8779
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=300
 NoNewPrivileges=true
 
 [Install]
